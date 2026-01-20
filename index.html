@@ -2,176 +2,168 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>永城七采区 - 地质 VR 调试版</title>
+    <title>永城七采区 - 3D体积模型(Block Model)</title>
     <script src="https://cdn.babylonjs.com/babylon.js"></script>
     <style>
-        body, html { overflow: hidden; width: 100%; height: 100%; margin: 0; background: #111; color: white; }
+        body, html { overflow: hidden; width: 100%; height: 100%; margin: 0; background: #050505; color: white; }
         #renderCanvas { width: 100%; height: 100%; touch-action: none; }
-        #ui { position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(0,0,0,0.85); padding: 15px; border-radius: 8px; font-family: sans-serif; width: 320px; border: 1px solid #444; }
-        .debug-log { font-size: 11px; color: #aaa; margin-top: 10px; height: 100px; overflow-y: auto; background: #000; padding: 5px; }
-        .control-group { margin: 10px 0; }
-        button { cursor: pointer; padding: 5px 10px; }
+        #ui { position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(20,20,20,0.9); padding: 20px; border-radius: 12px; font-family: 'Segoe UI', sans-serif; width: 300px; border: 1px solid #333; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+        .control-group { margin: 15px 0; }
+        input[type="range"] { width: 100%; }
+        .hint { font-size: 11px; color: #888; margin-top: 5px; }
+        button { background: #444; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; width: 100%; }
+        button:hover { background: #666; }
     </style>
 </head>
 <body>
     <div id="ui">
-        <strong>永城七采区 - 数据加载器</strong>
+        <strong style="font-size: 18px;">地质体积建模器</strong>
         <div class="control-group">
-            <label>1. 选择文件 (支持多选):</label><br>
+            <label>1. 上传地层数据(多选):</label>
             <input type="file" id="fileInput" accept=".txt" multiple>
+            <div class="hint">按住 Ctrl 选择 h22, h32, hl8...</div>
         </div>
         <div class="control-group">
-            <label>2. 垂直拉伸: <span id="zVal">10</span>倍</label>
-            <input type="range" id="zScale" min="1" max="50" value="10" style="width:100%">
+            <label>2. 垂直夸大系数: <span id="zVal">10</span></label>
+            <input type="range" id="zScale" min="1" max="100" value="10">
         </div>
-        <button id="resetCam">重置相机视角</button>
-        <div id="status" style="color: #0f0; margin-top:5px;">状态: 等待文件...</div>
-        <div id="log" class="debug-log">-- 运行日志 --</div>
+        <div class="control-group">
+            <label>3. 地层透明度: <span id="alphaVal">0.8</span></label>
+            <input type="range" id="alpha" min="1" max="10" value="8">
+        </div>
+        <button id="resetView">重置观察位置</button>
+        <div id="log" style="font-size: 12px; color: #0f0; margin-top: 15px; max-height: 80px; overflow-y: auto;">等待数据读取...</div>
     </div>
     <canvas id="renderCanvas"></canvas>
 
     <script>
         const canvas = document.getElementById("renderCanvas");
         const engine = new BABYLON.Engine(canvas, true);
-        const logDiv = document.getElementById("log");
         let scene, camera;
         let layers = []; 
         let zFactor = 10;
+        let opacity = 0.8;
 
-        function addLog(msg) {
-            const p = document.createElement("div");
-            p.innerText = `> ${msg}`;
-            logDiv.prepend(p);
-            console.log(msg);
+        function updateLog(msg) {
+            document.getElementById("log").innerHTML += `<div>> ${msg}</div>`;
         }
 
         const createScene = async function () {
             scene = new BABYLON.Scene(engine);
-            scene.clearColor = new BABYLON.Color3(0.05, 0.05, 0.1);
+            scene.clearColor = new BABYLON.Color3(0.01, 0.01, 0.02);
 
-            // 初始相机放在一个很远的位置，防止初始黑屏
-            camera = new BABYLON.ArcRotateCamera("camera", 0, 0, 100, BABYLON.Vector3.Zero(), scene);
-            camera.setPosition(new BABYLON.Vector3(500, 500, 500));
+            camera = new BABYLON.ArcRotateCamera("camera", -Math.PI/4, Math.PI/3, 500, BABYLON.Vector3.Zero(), scene);
             camera.attachControl(canvas, true);
             
-            new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
-            
-            // 辅助坐标轴
-            const axes = new BABYLON.AxesViewer(scene, 50);
+            const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+            light.intensity = 1.0;
 
-            try {
-                await scene.createDefaultXRExperienceAsync({ floorMeshes: [] });
-                addLog("WebXR VR 系统已就绪");
-            } catch(e) {
-                addLog("提示: 当前浏览器不支持直接进入VR模式");
-            }
+            // 开启 VR 模式
+            await scene.createDefaultXRExperienceAsync({ floorMeshes: [] });
             return scene;
         };
 
-        const colors = [
-            new BABYLON.Color4(1, 1, 0, 1), // 黄
-            new BABYLON.Color4(0, 1, 1, 1), // 青
-            new BABYLON.Color4(1, 0, 1, 1), // 紫
-            new BABYLON.Color4(0, 1, 0, 1)  // 绿
-        ];
-
-        async function parseData(file, idx) {
-            return new Promise((resolve) => {
+        // 统一解析地层文件
+        async function parseFile(file) {
+            return new Promise(resolve => {
                 const reader = new FileReader();
-                reader.onload = (e) => {
+                reader.onload = e => {
                     const lines = e.target.result.split('\n');
-                    const points = [];
-                    addLog(`正在解析: ${file.name}...`);
-                    
-                    for (let line of lines) {
-                        const cleanLine = line.trim();
-                        if (!cleanLine || cleanLine.startsWith('!') || cleanLine.startsWith('FMASCI')) continue;
-                        
-                        const parts = cleanLine.split(/\s+/);
-                        if (parts.length >= 3) {
-                            const x = parseFloat(parts[0]);
-                            const y = parseFloat(parts[1]);
-                            const z = parseFloat(parts[2]);
-                            // 过滤掉文件尾部的统计数据 (特征是 X 坐标远小于 UTM 坐标)
-                            if (!isNaN(x) && x > 100000) {
-                                points.push({ x, y, z });
-                            }
+                    let pts = [];
+                    lines.forEach(line => {
+                        const parts = line.trim().split(/\s+/);
+                        if(parts.length >= 3) {
+                            const x = parseFloat(parts[0]), y = parseFloat(parts[1]), z = parseFloat(parts[2]);
+                            if(x > 100000) pts.push({x, y, z});
                         }
-                    }
-                    addLog(`${file.name} 解析完成: ${points.length} 个点`);
-                    resolve({ name: file.name, points, color: colors[idx % colors.length] });
+                    });
+                    resolve({ name: file.name, points: pts });
                 };
                 reader.readAsText(file);
             });
         }
 
-        async function renderLayers() {
+        // 核心渲染逻辑：生成“体积感”
+        async function buildVolume() {
             if (layers.length === 0) return;
-
-            // 清理旧网格
-            scene.meshes.filter(m => m.id.startsWith("layer_")).forEach(m => m.dispose());
-
-            // 重新计算边界
-            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-            layers.forEach(l => {
-                l.points.forEach(p => {
-                    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
-                    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
-                });
-            });
-
-            const midX = (minX + maxX) / 2;
-            const midY = (minY + maxY) / 2;
-
-            layers.forEach((layer, i) => {
-                const pcs = new BABYLON.PointsCloudSystem("layer_" + i, 4, scene);
-                pcs.addPoints(layer.points.length, (particle, j) => {
-                    const p = layer.points[j];
-                    particle.position = new BABYLON.Vector3(
-                        p.x - midX,
-                        p.z * (zFactor / 10), // Z 轴垂直变换
-                        p.y - midY
-                    );
-                    particle.color = layer.color;
-                });
-                pcs.buildMeshAsync();
-            });
-
-            addLog("三维场景更新成功");
-            document.getElementById("status").innerText = `状态: 已加载 ${layers.length} 层`;
             
-            // 自动对焦
+            // 销毁旧物体
+            scene.meshes.forEach(m => { if(m.id.startsWith("vol_")) m.dispose(); });
+
+            // 计算所有地层的边界
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            layers.forEach(l => l.points.forEach(p => {
+                if(p.x < minX) minX = p.x; if(p.x > maxX) maxX = p.x;
+                if(p.y < minY) minY = p.y; if(p.y > maxY) maxY = p.y;
+            }));
+            const centerX = (minX + maxX) / 2, centerY = (minY + maxY) / 2;
+
+            // 为了显示“体”，我们对每个地层点位生成一个“块”
+            layers.forEach((layer, idx) => {
+                // 为不同层创建材质
+                const mat = new BABYLON.StandardMaterial("mat_" + idx, scene);
+                const hue = (idx * 137) % 360; // 自动分配色调
+                mat.diffuseColor = BABYLON.Color3.FromHSV(hue, 0.8, 1);
+                mat.alpha = opacity;
+                mat.backFaceCulling = false;
+
+                // 使用 SPS (Solid Particle System) 来渲染大量“体块”
+                const sps = new BABYLON.SolidParticleSystem("vol_" + idx, scene);
+                const box = BABYLON.MeshBuilder.CreateBox("b", { size: 1.5 });
+                sps.addShape(box, layer.points.length);
+                box.dispose();
+
+                sps.buildMesh();
+                sps.mesh.material = mat;
+
+                sps.initParticles = () => {
+                    for (let p = 0; p < sps.nbParticles; p++) {
+                        const data = layer.points[p];
+                        const part = sps.particles[p];
+                        part.position.x = data.x - centerX;
+                        part.position.z = data.y - centerY;
+                        part.position.y = data.z * (zFactor / 10);
+                        
+                        // 让块在垂直方向上拉伸，形成连接感
+                        part.scaling.y = 5; 
+                        part.scaling.x = 2;
+                        part.scaling.z = 2;
+                    }
+                };
+                sps.initParticles();
+                sps.setParticles();
+            });
+
+            updateLog("体积化构建完成");
+            camera.radius = (maxX - minX) * 0.5;
             camera.setTarget(BABYLON.Vector3.Zero());
-            camera.radius = (maxX - minX) * 0.7;
         }
 
-        document.getElementById('fileInput').addEventListener('change', async (e) => {
+        document.getElementById('fileInput').onchange = async (e) => {
             const files = Array.from(e.target.files);
-            if (files.length === 0) return;
-            
             layers = [];
-            for(let i=0; i<files.length; i++) {
-                const data = await parseData(files[i], i);
-                if (data.points.length > 0) layers.push(data);
+            for(let f of files) {
+                const d = await parseFile(f);
+                if(d.points.length > 0) layers.push(d);
             }
-            renderLayers();
-        });
-
-        document.getElementById('zScale').addEventListener('input', (e) => {
-            zFactor = e.target.value;
-            document.getElementById("zVal").innerText = zFactor;
-            renderLayers();
-        });
-
-        document.getElementById('resetCam').onclick = () => {
-            camera.setTarget(BABYLON.Vector3.Zero());
-            addLog("相机已重置");
+            buildVolume();
         };
 
-        createScene().then(() => {
-            engine.runRenderLoop(() => scene.render());
-        });
+        document.getElementById('zScale').oninput = (e) => {
+            zFactor = e.target.value;
+            document.getElementById("zVal").innerText = zFactor;
+            buildVolume();
+        };
 
+        document.getElementById('alpha').oninput = (e) => {
+            opacity = e.target.value / 10;
+            document.getElementById("alphaVal").innerText = opacity;
+            buildVolume();
+        };
+
+        document.getElementById('resetView').onclick = () => camera.setTarget(BABYLON.Vector3.Zero());
+
+        createScene().then(() => engine.runRenderLoop(() => scene.render()));
         window.addEventListener("resize", () => engine.resize());
     </script>
 </body>
