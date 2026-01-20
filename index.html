@@ -2,118 +2,152 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>XR地质沉浸式系统 - 研究原型</title>
+    <title>徐鹏 - XR地质体三维沉浸式可视化系统</title>
     <script src="https://cdn.babylonjs.com/babylon.js"></script>
     <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
     <style>
         body, html { overflow: hidden; width: 100%; height: 100%; margin: 0; background: #000; }
-        #renderCanvas { width: 100%; height: 100%; }
-        #overlay { position: absolute; top: 10px; left: 10px; color: white; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; font-family: sans-serif; pointer-events: none; }
+        #renderCanvas { width: 100%; height: 100%; touch-action: none; }
+        #infoPanel { position: absolute; top: 15px; left: 15px; background: rgba(0,0,0,0.8); color: #0f0; padding: 15px; border-radius: 8px; font-family: 'Consolas', monospace; font-size: 12px; pointer-events: none; border: 1px solid #333; }
     </style>
 </head>
 <body>
-    <div id="overlay">
-        <strong>研究目标实现：沉浸式分析系统</strong><br>
-        1. 剖切面：实时观察地层内部结构<br>
-        2. 拾取：点击获取地质属性 (X,Y,Z,Depth)<br>
-        3. 性能：Thin Instance GPU 加速
+    <div id="infoPanel">
+        <strong>[永城七采区 XR 研究原型]</strong><br>
+        1. 加载文件: 选择 h22, h32, hl8 等<br>
+        2. 性能状态: <span id="fps">0</span> FPS<br>
+        3. 交互模式: XR 沉浸式 + 动态剖切
     </div>
     <canvas id="renderCanvas"></canvas>
 
     <script>
         const canvas = document.getElementById("renderCanvas");
         const engine = new BABYLON.Engine(canvas, true);
-        let scene, camera, clipPlane;
-        let layersData = [];
+        let scene, camera, slicingPlane;
+        let layers = [];
+
+        // 针对你提供的文件坐标中心进行预设 (UTM 坐标中心)
+        const OFFSET_X = 441000;
+        const OFFSET_Y = 3755000;
 
         const createScene = async function () {
             scene = new BABYLON.Scene(engine);
-            scene.clearColor = new BABYLON.Color4(0.05, 0.05, 0.1, 1);
+            scene.clearColor = new BABYLON.Color4(0.02, 0.02, 0.05, 1);
 
-            // 1. 相机与光照
-            camera = new BABYLON.ArcRotateCamera("cam", -Math.PI/2, Math.PI/3, 400, BABYLON.Vector3.Zero(), scene);
+            // 1. 专业相机配置
+            camera = new BABYLON.ArcRotateCamera("camera", -Math.PI/2, Math.PI/3, 500, BABYLON.Vector3.Zero(), scene);
             camera.attachControl(canvas, true);
-            new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+            camera.wheelPrecision = 10;
 
-            // 2. 实现开题报告中的“动态剖切” (Slicing Plane) 
-            // 创建一个剖切面
-            clipPlane = new BABYLON.Plane(0, 1, 0, 0); // 初始在Y轴
-            scene.clipPlane = clipPlane;
+            const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+            light.intensity = 0.8;
 
-            // 3. XR 支持 - 对应“沉浸式可视化”目标 
-            await scene.createDefaultXRExperienceAsync({ floorMeshes: [] });
+            // 2. 动态剖切面 (实现开题报告中的沉浸式分析目标)
+            slicingPlane = new BABYLON.Plane(0, -1, 0, 1000); 
+            scene.clipPlane = slicingPlane;
 
-            // 4. GUI 控制剖切深度
+            // 3. XR 模式启动
+            const xr = await scene.createDefaultXRExperienceAsync({ floorMeshes: [] });
+
+            // 4. GUI 控制面板 (剖切高度)
             const adt = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI("UI");
             const panel = new BABYLON.GUI.StackPanel();
-            panel.width = "220px";
-            panel.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+            panel.width = "200px"; panel.horizontalAlignment = 1; panel.verticalAlignment = 0;
             adt.addControl(panel);
 
             const label = new BABYLON.GUI.TextBlock();
-            label.text = "动态剖切高度"; label.height = "30px"; label.color = "white";
+            label.text = "剖切高度控制"; label.height = "30px"; label.color = "white";
             panel.addControl(label);
 
             const slider = new BABYLON.GUI.Slider();
-            slider.minimum = -200; slider.maximum = 500; slider.value = 500;
-            slider.height = "20px"; slider.width = "200px";
-            slider.onValueChangedObservable.add((val) => {
-                scene.clipPlane = new BABYLON.Plane(0, -1, 0, val); // 动态改变剖切高度
+            slider.minimum = -1000; slider.maximum = 1000; slider.value = 1000;
+            slider.height = "20px"; slider.width = "180px";
+            slider.onValueChangedObservable.add(v => {
+                scene.clipPlane = new BABYLON.Plane(0, -1, 0, v);
             });
             panel.addControl(slider);
 
             return scene;
         };
 
-        // 5. 数据处理：对应“数据预处理”技术路线 
-        async function loadAndBuild(files) {
-            // 清理旧模型
-            scene.meshes.filter(m => m.name.includes("layer")).forEach(m => m.dispose());
-            
-            for (let i = 0; i < files.length; i++) {
-                const text = await files[i].text();
-                const pts = text.split('\n').map(l => l.trim().split(/\s+/))
-                                .filter(p => p.length >= 3 && parseFloat(p[0]) > 100000)
-                                .map(p => ({ x: parseFloat(p[0]), y: parseFloat(p[1]), z: parseFloat(p[2]) }));
+        // 高效解析 FMASCI 文件函数
+        async function processGeoFile(file, idx) {
+            const text = await file.text();
+            const lines = text.split('\n');
+            const data = [];
 
-                buildLayer(pts, i, files[i].name);
-            }
+            lines.forEach(line => {
+                const row = line.trim();
+                // 排除注释和非数据行
+                if (!row || row.startsWith('!') || row.startsWith('FMASCI')) return;
+                
+                const parts = row.split(/\s+/);
+                if (parts.length >= 3) {
+                    const x = parseFloat(parts[0]);
+                    const y = parseFloat(parts[1]);
+                    const z = parseFloat(parts[2]);
+                    // 过滤文件尾部的统计杂质点
+                    if (x > 100000) data.push({x, y, z});
+                }
+            });
+
+            if (data.length > 0) buildVolumetricLayer(data, idx, file.name);
         }
 
-        // 6. 高性能渲染：实现“性能约束机理研究” 
-        function buildLayer(points, index, name) {
-            const center = { x: 441000, y: 3755000 }; // 简化中心点
-            const baseBox = BABYLON.MeshBuilder.CreateBox("layer_"+index, { size: 4 }, scene);
-            
-            const mat = new BABYLON.StandardMaterial("mat_"+index, scene);
-            mat.diffuseColor = BABYLON.Color3.FromHSV(index * 40, 0.8, 1);
-            baseBox.material = mat;
+        // 核心建模逻辑：实现“体积感”与“高性能”的平衡
+        function buildVolumetricLayer(points, index, filename) {
+            const colors = [
+                new BABYLON.Color3(1, 0.8, 0), // 2-2煤 (金)
+                new BABYLON.Color3(0, 0.8, 1), // 3-2煤 (蓝)
+                new BABYLON.Color3(0.8, 0, 1), // L8灰岩 (紫)
+                new BABYLON.Color3(0, 1, 0.5)  // 其它
+            ];
 
+            // 创建单个母体方块 (体积单元)
+            const box = BABYLON.MeshBuilder.CreateBox("block_" + index, { size: 4 }, scene);
+            const mat = new BABYLON.StandardMaterial("mat_" + index, scene);
+            mat.diffuseColor = colors[index % colors.length];
+            mat.backFaceCulling = false;
+            mat.freeze(); // 性能优化：冷冻材质
+            box.material = mat;
+
+            // 使用 Thin Instances 渲染所有体积点
             const matricesData = new Float32Array(16 * points.length);
             points.forEach((p, i) => {
-                const matrix = BABYLON.Matrix.Translation(p.x - center.x, p.z, p.y - center.y);
+                const matrix = BABYLON.Matrix.Translation(
+                    p.x - OFFSET_X, 
+                    p.z,            // 垂直高度
+                    p.y - OFFSET_Y
+                );
+                // 赋予一定的垂直厚度缩放 (Volume Scaling)
+                const scale = BABYLON.Matrix.Scaling(1, 10, 1); 
+                scale.multiplyToRef(matrix, matrix);
                 matrix.copyToArray(matricesData, i * 16);
             });
 
-            baseBox.thinInstanceSetBuffer("matrix", matricesData, 16);
-            
-            // 7. 属性拾取：实现“属性信息关联展示” 
-            baseBox.metadata = { fileName: name, pointCount: points.length };
+            box.thinInstanceSetBuffer("matrix", matricesData, 16);
+            console.log(`层位 ${filename} 加载完成，点数: ${points.length}`);
         }
 
-        // 交互拾取逻辑
-        window.addEventListener("click", () => {
-            const pick = scene.pick(scene.pointerX, scene.pointerY);
-            if (pick.hit && pick.pickedMesh.name.includes("layer")) {
-                const meta = pick.pickedMesh.metadata;
-                alert(`选中地层: ${meta.fileName}\n数据点数: ${meta.pointCount}`);
+        // 文件监听
+        const fileInput = document.createElement("input");
+        fileInput.type = "file"; fileInput.multiple = true;
+        fileInput.style.position = "absolute"; fileInput.style.top = "100px"; fileInput.style.left = "15px";
+        fileInput.style.zIndex = "100";
+        document.body.appendChild(fileInput);
+
+        fileInput.onchange = async (e) => {
+            const files = Array.from(e.target.files);
+            for(let i=0; i<files.length; i++) {
+                await processGeoFile(files[i], i);
             }
-        });
+        };
 
         createScene().then(() => {
-            engine.runRenderLoop(() => scene.render());
-            // 模拟文件上传（实际应用中需通过 input 触发）
-            // loadAndBuild(uploadedFiles); 
+            engine.runRenderLoop(() => {
+                scene.render();
+                document.getElementById("fps").innerText = engine.getFps().toFixed(0);
+            });
         });
 
         window.addEventListener("resize", () => engine.resize());
