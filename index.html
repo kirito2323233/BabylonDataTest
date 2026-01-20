@@ -2,141 +2,140 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>地质可视化调试版 - 解决黑屏</title>
+    <title>XR地质沉浸式分析系统 - 研究原型</title>
     <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
     <style>
         body, html { overflow: hidden; width: 100%; height: 100%; margin: 0; background: #000; }
         #renderCanvas { width: 100%; height: 100%; }
-        #ui { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); color: #0f0; padding: 15px; border-radius: 5px; font-family: monospace; border: 1px solid #444; }
-        .btn { background: #222; color: #0f0; border: 1px solid #0f0; padding: 5px 10px; cursor: pointer; margin-top: 10px; display: block; }
+        #overlay { position: absolute; top: 10px; left: 10px; color: #0f0; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; font-family: 'Microsoft YaHei', sans-serif; pointer-events: none; border: 1px solid #333; }
     </style>
 </head>
 <body>
-    <div id="ui">
-        <strong>控制台 / 状态反馈</strong>
-        <div id="log" style="margin: 10px 0; font-size: 12px; color: #ccc;">请选择文件...</div>
-        <input type="file" id="fileInput" accept=".txt" multiple>
-        <button class="btn" onclick="resetCamera()">强制重置相机对焦</button>
-        <div style="font-size: 11px; color: #666; margin-top: 5px;">* 如果黑屏，请点击上方按钮</div>
+    <div id="overlay">
+        <strong>开题报告研究目标：沉浸式分析</strong><br>
+        1. [已完成] 坐标转换与对焦<br>
+        2. [待测试] 动态垂直剖切 (XR 交互)<br>
+        3. [待测试] 地层属性拾取
     </div>
     <canvas id="renderCanvas"></canvas>
 
     <script>
         const canvas = document.getElementById("renderCanvas");
         const engine = new BABYLON.Engine(canvas, true);
-        let scene, camera;
-        let allLayers = [];
+        let scene, camera, xrHelper;
+        let layersMap = new Map(); // 存储图层引用
+        let center = { x: 441000, y: 3755000, z: 0 }; // 默认中心
 
-        // 核心：动态中心点（不再硬编码）
-        let center = { x: 0, y: 0, z: 0 };
-
-        const createScene = function () {
+        const createScene = async function () {
             scene = new BABYLON.Scene(engine);
-            scene.clearColor = new BABYLON.Color4(0.05, 0.05, 0.1, 1);
+            scene.clearColor = new BABYLON.Color4(0, 0, 0.05, 1);
 
-            // 初始化一个基础相机
-            camera = new BABYLON.ArcRotateCamera("camera", 0, 0, 100, BABYLON.Vector3.Zero(), scene);
+            // 1. 相机配置
+            camera = new BABYLON.ArcRotateCamera("cam", -Math.PI/2, Math.PI/3, 600, BABYLON.Vector3.Zero(), scene);
             camera.attachControl(canvas, true);
             
+            // 2. 光照优化
             const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
-            light.intensity = 1.0;
+            light.intensity = 0.8;
 
-            // 坐标轴辅助 (红色X, 绿色Y, 蓝色Z)
-            new BABYLON.AxesViewer(scene, 100);
+            // 3. XR 沉浸式环境 (核心目标)
+            try {
+                xrHelper = await scene.createDefaultXRExperienceAsync({
+                    floorMeshes: [] // 地质体通常悬浮在空中观察，不设地板
+                });
+                console.log("XR 系统已就绪");
+            } catch(e) { console.log("当前环境不支持 WebXR"); }
+
+            // 4. GUI 面板：图层控制 (实现报告中的“交互方式研究”)
+            const adt = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI("UI");
+            const panel = new BABYLON.GUI.StackPanel();
+            panel.width = "200px";
+            panel.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+            panel.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+            adt.addControl(panel);
+
+            window.addLayerToggle = (name, mesh) => {
+                const checkbox = new BABYLON.GUI.Checkbox();
+                checkbox.width = "20px"; checkbox.height = "20px";
+                checkbox.isChecked = true; checkbox.color = "green";
+                checkbox.onIsCheckedChangedObservable.add(value => mesh.isVisible = value);
+
+                const header = BABYLON.GUI.Control.AddHeader(checkbox, name, "180px", { isHorizontal: true, controlFirst: true });
+                header.height = "30px"; header.color = "white";
+                panel.addControl(header);
+            };
 
             return scene;
         };
 
-        // 统一文件解析逻辑
-        async function parseFMASCI(file) {
-            const text = await file.text();
-            const lines = text.split('\n');
-            const points = [];
-            
-            lines.forEach(line => {
-                const parts = line.trim().split(/\s+/);
-                // 校验：必须有三个以上数字，且第一个数字是UTM坐标（通常>100000）
-                if (parts.length >= 3) {
-                    const x = parseFloat(parts[0]);
-                    const y = parseFloat(parts[1]);
-                    const z = parseFloat(parts[2]);
-                    if (!isNaN(x) && x > 100000) {
-                        points.push({x, y, z});
-                    }
-                }
-            });
-            return points;
-        }
+        // 文件处理函数
+        async function loadGeoFiles(files) {
+            let sumX = 0, sumY = 0, count = 0;
+            const fileData = [];
 
-        async function handleFiles(files) {
-            const logEl = document.getElementById("log");
-            logEl.innerText = "正在解析数据...";
-            
-            // 1. 清理场景
-            scene.meshes.forEach(m => { if(m.name.startsWith("layer")) m.dispose(); });
-            allLayers = [];
-
-            // 2. 批量解析并寻找全场中心点
-            let sumX = 0, sumY = 0, sumZ = 0, totalPts = 0;
-            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-
-            for (let file of files) {
-                const pts = await parseFMASCI(file);
-                if (pts.length > 0) {
-                    allLayers.push({ name: file.name, data: pts });
-                    pts.forEach(p => {
-                        sumX += p.x; sumY += p.y; sumZ += p.z;
-                        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
-                        if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
-                    });
-                    totalPts += pts.length;
-                }
-            }
-
-            if (totalPts === 0) {
-                logEl.innerText = "错误：未识别到有效数据点！";
-                return;
-            }
-
-            // 3. 计算中心（关键：解决黑屏）
-            center.x = sumX / totalPts;
-            center.y = sumY / totalPts;
-            center.z = sumZ / totalPts;
-
-            // 4. 渲染 Thin Instances
-            allLayers.forEach((layer, idx) => {
-                const mat = new BABYLON.StandardMaterial("mat" + idx, scene);
-                mat.diffuseColor = BABYLON.Color3.FromHSV(idx * 60, 0.8, 1);
+            // 预读取计算中心点
+            for (let f of files) {
+                const text = await f.text();
+                const pts = text.split('\n')
+                    .map(l => l.trim().split(/\s+/))
+                    .filter(p => p.length >= 3 && parseFloat(p[0]) > 100000)
+                    .map(p => ({ x: parseFloat(p[0]), y: parseFloat(p[1]), z: parseFloat(p[2]) }));
                 
-                const box = BABYLON.MeshBuilder.CreateBox("layer_" + idx, { size: 5 }, scene);
-                box.material = mat;
+                if (pts.length > 0) {
+                    fileData.push({ name: f.name, pts });
+                    pts.forEach(p => { sumX += p.x; sumY += p.y; count++; });
+                }
+            }
 
-                const matricesData = new Float32Array(16 * layer.data.length);
-                layer.data.forEach((p, i) => {
-                    // 相对于中心点的位移
-                    const matrix = BABYLON.Matrix.Translation(p.x - center.x, p.z - center.z, p.y - center.y);
-                    matrix.copyToArray(matricesData, i * 16);
+            if (count > 0) {
+                center.x = sumX / count; center.y = sumY / count;
+                
+                fileData.forEach((layer, i) => {
+                    const box = BABYLON.MeshBuilder.CreateBox("layer_" + layer.name, { size: 3 }, scene);
+                    const mat = new BABYLON.StandardMaterial("mat_" + i, scene);
+                    // 为不同地层自动分配颜色
+                    const colors = [BABYLON.Color3.Yellow(), BABYLON.Color3.Cyan(), BABYLON.Color3.Purple(), BABYLON.Color3.Green()];
+                    mat.diffuseColor = colors[i % colors.length];
+                    box.material = mat;
+
+                    const matricesData = new Float32Array(16 * layer.pts.length);
+                    layer.pts.forEach((p, j) => {
+                        const matrix = BABYLON.Matrix.Translation(p.x - center.x, p.z, p.y - center.y);
+                        // 垂直夸大系数设为 5
+                        BABYLON.Matrix.Scaling(1, 5, 1).multiplyToRef(matrix, matrix);
+                        matrix.copyToArray(matricesData, j * 16);
+                    });
+                    box.thinInstanceSetBuffer("matrix", matricesData, 16);
+                    
+                    // 添加到 GUI 切换
+                    window.addLayerToggle(layer.name.split('_')[0], box);
                 });
-                box.thinInstanceSetBuffer("matrix", matricesData, 16);
-            });
-
-            logEl.innerText = `成功！加载 ${allLayers.length} 层，共 ${totalPts} 点。`;
-            resetCamera(maxX - minX);
+                
+                camera.setTarget(BABYLON.Vector3.Zero());
+            }
         }
 
-        function resetCamera(range = 500) {
-            if (!camera) return;
-            camera.setTarget(BABYLON.Vector3.Zero());
-            camera.radius = range > 500 ? range * 0.8 : 500;
-            camera.alpha = -Math.PI / 2;
-            camera.beta = Math.PI / 3;
-            console.log("相机已对焦至中心 (0,0,0)");
-        }
+        // 交互：点击拾取属性 (研究内容 3)
+        window.addEventListener("click", () => {
+            const pick = scene.pick(scene.pointerX, scene.pointerY);
+            if (pick.hit && pick.pickedMesh.name.includes("layer")) {
+                console.log("选中的地层: " + pick.pickedMesh.name);
+                // 这里可以弹出具体的坐标信息窗口
+            }
+        });
 
-        document.getElementById('fileInput').onchange = (e) => handleFiles(e.target.files);
+        // 文件上传监听
+        const input = document.createElement("input");
+        input.type = "file"; input.multiple = true;
+        input.style.position = "absolute"; input.top = "100px"; input.left = "10px";
+        document.body.appendChild(input);
+        input.onchange = (e) => loadGeoFiles(e.target.files);
 
-        scene = createScene();
-        engine.runRenderLoop(() => scene.render());
+        createScene().then(() => {
+            engine.runRenderLoop(() => scene.render());
+        });
+
         window.addEventListener("resize", () => engine.resize());
     </script>
 </body>
