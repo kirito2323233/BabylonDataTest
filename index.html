@@ -2,66 +2,81 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>永城七采区 - 地质 VR 场景预览</title>
+    <title>永城七采区 - VR 地质预览 (调试版)</title>
     <script src="https://cdn.babylonjs.com/babylon.js"></script>
     <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
-    <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
     <style>
-        body, html { overflow: hidden; width: 100%; height: 100%; margin: 0; padding: 0; }
+        body, html { overflow: hidden; width: 100%; height: 100%; margin: 0; background: #000; }
         #renderCanvas { width: 100%; height: 100%; touch-action: none; }
-        #ui { position: absolute; top: 20px; left: 20px; z-index: 10; background: rgba(255,255,255,0.8); padding: 15px; border-radius: 8px; font-family: Arial; }
+        #ui { position: absolute; top: 10px; left: 10px; z-index: 10; background: rgba(0,0,0,0.7); color: white; padding: 15px; border-radius: 5px; font-family: sans-serif; pointer-events: auto; }
+        input { margin-top: 10px; color: black; }
     </style>
 </head>
 <body>
     <div id="ui">
-        <h3>永城七采区地质模型生成器</h3>
-        <p>请选择一个 .txt 文件 (如 h22_hdk1.txt):</p>
-        <input type="file" id="fileInput" accept=".txt">
-        <div id="status">等待导入数据...</div>
+        <strong>永城七采区 VR 加载器</strong><br>
+        <small>支持文件: h22, h32, tq 等 txt 文件</small><br>
+        <input type="file" id="fileInput" accept=".txt"><br>
+        <div id="status" style="margin-top:10px; color: #0f0;">状态: 等待文件...</div>
     </div>
     <canvas id="renderCanvas"></canvas>
 
     <script>
         const canvas = document.getElementById("renderCanvas");
         const engine = new BABYLON.Engine(canvas, true);
-        let scene, pcs;
+        let scene, camera, pcs;
 
         const createScene = async function () {
             scene = new BABYLON.Scene(engine);
-            scene.clearColor = new BABYLON.Color3(0.05, 0.05, 0.1);
+            scene.clearColor = new BABYLON.Color3(0.1, 0.1, 0.1);
 
-            // 1. 相机设置（通用相机，支持 VR）
-            const camera = new BABYLON.UniversalCamera("camera", new BABYLON.Vector3(0, 50, -100), scene);
-            camera.setTarget(BABYLON.Vector3.Zero());
+            // 使用环绕相机，更方便观察物体
+            camera = new BABYLON.ArcRotateCamera("camera", -Math.PI / 2, Math.PI / 2.5, 100, BABYLON.Vector3.Zero(), scene);
             camera.attachControl(canvas, true);
+            camera.wheelPrecision = 10; // 鼠标滚轮灵敏度
 
-            // 2. 灯光
             const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
-            light.intensity = 0.7;
+            light.intensity = 1.0;
 
-            // 3. 开启 WebXR (VR 支持)
-            try {
-                const xrHelper = await scene.createDefaultXRExperienceAsync({
-                    floorMeshes: [] // 如果有地面网格可以放这里
-                });
-                console.log("VR 准备就绪");
-            } catch (e) {
-                console.log("当前环境不支持 WebXR");
-            }
+            // 显示辅助坐标轴 (红:X, 绿:Y, 蓝:Z)
+            const showAxis = function(size) {
+                const makeTextPlane = (text, color, size) => {
+                    const dynamicTexture = new BABYLON.DynamicTexture("DynamicTexture", 50, scene, true);
+                    dynamicTexture.hasAlpha = true;
+                    dynamicTexture.drawText(text, 5, 40, "bold 36px Arial", color , "transparent", true);
+                    const plane = BABYLON.Mesh.CreatePlane("TextPlane", size, scene, true);
+                    const mat = new BABYLON.StandardMaterial("TextPlaneMaterial", scene);
+                    mat.backFaceCulling = false;
+                    mat.specularColor = new BABYLON.Color3(0, 0, 0);
+                    mat.diffuseTexture = dynamicTexture;
+                    plane.material = mat;
+                    return plane;
+                };
+                const axisX = BABYLON.Mesh.CreateLines("axisX", [BABYLON.Vector3.Zero(), new BABYLON.Vector3(size, 0, 0)], scene);
+                axisX.color = new BABYLON.Color3(1, 0, 0);
+                const axisY = BABYLON.Mesh.CreateLines("axisY", [BABYLON.Vector3.Zero(), new BABYLON.Vector3(0, size, 0)], scene);
+                axisY.color = new BABYLON.Color3(0, 1, 0);
+                const axisZ = BABYLON.Mesh.CreateLines("axisZ", [BABYLON.Vector3.Zero(), new BABYLON.Vector3(0, 0, size)], scene);
+                axisZ.color = new BABYLON.Color3(0, 0, 1);
+            };
+            showAxis(10); // 绘制10米长的坐标轴
+
+            // 开启 VR
+            const xr = await scene.createDefaultXRExperienceAsync({ floorMeshes: [] });
 
             return scene;
         };
 
-        // 数据解析核心逻辑
         async function processFileData(text) {
             const lines = text.split('\n');
             const points = [];
-            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            let min = {x:Infinity, y:Infinity, z:Infinity}, max = {x:-Infinity, y:-Infinity, z:-Infinity};
+
+            document.getElementById("status").innerText = "解析中...";
 
             for (let line of lines) {
                 line = line.trim();
-                // 跳过文件头
-                if (!line || line.startsWith('!') || line.startsWith('FMASCI') || line.startsWith('-')) continue;
+                if (!line || line.startsWith('!') || line.startsWith('FMASCI')) continue;
 
                 const parts = line.split(/\s+/);
                 if (parts.length >= 3) {
@@ -70,67 +85,71 @@
                     const z = parseFloat(parts[2]);
 
                     if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+                        // 注意：这里的数据点可能包含文件结尾的统计信息行（如 13.00 2.00 0.00）
+                        // 真实的地质点坐标 X 通常在 400000 以上
+                        if (x < 10000) continue; 
+
                         points.push({ x, y, z });
-                        // 计算边界用于平移坐标系
-                        if (x < minX) minX = x; if (x > maxX) maxX = x;
-                        if (y < minY) minY = y; if (y > maxY) maxY = y;
+                        if (x < min.x) min.x = x; if (x > max.x) max.x = x;
+                        if (y < min.y) min.y = y; if (y > max.y) max.y = y;
+                        if (z < min.z) min.z = z; if (z > max.z) max.z = z;
                     }
                 }
             }
 
-            if (points.length === 0) return;
+            if (points.length === 0) {
+                document.getElementById("status").innerText = "错误: 未识别到有效坐标";
+                return;
+            }
 
-            // 计算中心点偏移量
-            const offsetX = (minX + maxX) / 2;
-            const offsetY = (minY + maxY) / 2;
+            const centerX = (min.x + max.x) / 2;
+            const centerY = (min.y + max.y) / 2;
+            const centerZ = (min.z + max.z) / 2;
 
-            // 如果之前有模型，先销毁
             if (pcs) pcs.dispose();
-
-            // 使用 Babylon 的点云系统 (PCS) 高效渲染
-            pcs = new BABYLON.PointsCloudSystem("pcs", 2, scene);
+            
+            // 创建点云，点大小设为 5
+            pcs = new BABYLON.PointsCloudSystem("pcs", 5, scene);
 
             const addPoints = (particle, i, s) => {
                 const p = points[i];
-                // 转换坐标：
-                // Babylon Y轴是垂直向上的，所以原始Y(北向)对应Babylon的Z，原始Z(深度)对应Babylon的Y
+                // 转换到原点附近
                 particle.position = new BABYLON.Vector3(
-                    (p.x - offsetX), 
-                    p.z * 0.1, // 深度通常较小，这里乘0.1缩小比例，或者根据需要调整
-                    (p.y - offsetY)
+                    p.x - centerX, 
+                    (p.z - centerZ) * 0.5, // 垂直拉伸系数，如果太扁可以改大
+                    p.y - centerY
                 );
                 
-                // 根据深度上色 (颜色映射)
-                const colorRatio = (p.z + 1000) / 1000; // 假设深度在-1000到0之间
-                particle.color = new BABYLON.Color4(1 - colorRatio, colorRatio, 0.5, 1);
+                // 根据相对深度上色
+                const normZ = (p.z - min.z) / (max.z - min.z || 1);
+                particle.color = new BABYLON.Color4(normZ, 1 - normZ, 0.5, 1);
             };
 
             pcs.addPoints(points.length, addPoints);
             await pcs.buildMeshAsync();
             
-            document.getElementById("status").innerText = `成功加载 ${points.length} 个数据点`;
+            // 让相机自动对准新生成的点云
+            camera.setTarget(BABYLON.Vector3.Zero());
+            const radius = Math.max(max.x - min.x, max.y - min.y) * 0.6;
+            camera.radius = radius > 1000 ? 500 : radius; // 防止相机过远
+
+            document.getElementById("status").innerText = `已加载: ${points.length} 个点`;
+            console.log("数据范围:", min, max);
         }
 
-        // 文件读取监听
         document.getElementById('fileInput').addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (!file) return;
             const reader = new FileReader();
-            reader.onload = function(e) {
-                processFileData(e.target.result);
-            };
+            reader.onload = (e) => processFileData(e.target.result);
             reader.readAsText(file);
         });
 
         createScene().then(() => {
-            engine.runRenderLoop(() => {
-                scene.render();
-            });
+            engine.runRenderLoop(() => scene.render());
         });
 
-        window.addEventListener("resize", () => {
-            engine.resize();
-        });
+        window.addEventListener("resize", () => engine.resize());
     </script>
 </body>
 </html>
